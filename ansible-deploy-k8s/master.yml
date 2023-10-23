@@ -1,17 +1,40 @@
 - hosts: masters
   become: yes
   tasks:
+    - name: Install required packaged
+      apt:
+        name: "{{ item }}"
+        state: present
+      with_items:
+        - acl
+
+    - name: check if cluster-exists
+      stat:
+        path: /etc/kubernetes/admin.conf
+      register: has_admin_conf
+
     - name: initialize the cluster
-      shell: kubeadm init --pod-network-cidr=10.244.0.0/16
+      shell: kubeadm init --pod-network-cidr=10.244.0.0/16 --apiserver-cert-extra-sans 192.168.x.x --apiserver-advertise-address=192.168.64.6
       args:
         chdir: $HOME
         creates: cluster_initialized.txt
+      when: has_admin_conf.stat.exists == false
+
+    - name: Ensure group "kube" exists
+      ansible.builtin.group:
+        name: kube
+        state: present
+
+    - name: Add the user 'kube' group of 'kube'
+      ansible.builtin.user:
+        name: kube
+        group: kube
 
     - name: create .kube directory
-      become: yes
-      become_user: kube
       file:
-        path: $HOME/.kube
+        owner: kube
+        group: kube
+        path: /home/kube/.kube
         state: directory
         mode: 0755
 
@@ -22,13 +45,19 @@
         remote_src: yes
         owner: kube
 
+    - name: Wait for port 6443 to become open on the host, don't start checking for 10 seconds
+      ansible.builtin.wait_for:
+        port: 6443
+        delay: 10
+
     - name: install Pod network
       become: yes
       become_user: kube
-      shell: kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml 
+      shell: kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
       args:
         chdir: $HOME
-        
+
+
     - name: Get the token for joining the worker nodes
       become: yes
       become_user: kube
@@ -36,8 +65,20 @@
       register: kubernetes_join_command
 
     - debug:
-      msg: "{{ kubernetes_join_command.stdout }}"
+        msg: "{{ kubernetes_join_command.stdout }}"
 
-    - name: Copy join command to local file.
-      become: yes
-      local_action: copy content="{{ kubernetes_join_command.stdout_lines[0] }}" dest="/tmp/kubernetes_join_command" mode=0777
+    - name: Create your local file on master node
+      ansible.builtin.file:
+        path: /tmp/kubernetes_join_command
+        mode: '0644'
+      delegate_to: localhost
+
+    - name: Print output to file
+      ansible.builtin.copy:
+        content: "{{kubernetes_join_command.stdout_lines[0]}}"
+        dest: /tmp/kubernetes_join_command
+      delegate_to: localhost
+
+    #- name: Copy join command to local file.
+      #become: yes
+    #  local_action: copy content="{{ kubernetes_join_command.stdout_lines[0] }}" dest="/tmp/kubernetes_join_command" mode=0777
